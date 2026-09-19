@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Wallshow"
+rootProject.name = "Automatic Wallpaper Changer"
 
 include(":app")

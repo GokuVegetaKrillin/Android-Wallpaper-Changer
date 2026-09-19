@@ -24,3 +24,14 @@ data class WallpaperEntity(
     val isIncludedInSlideshow: Boolean = true,
     val dateAdded: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "operation_logs")
+data class OperationLogEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val timestamp: Long = System.currentTimeMillis(),
+    val action: String, // e.g. "Wallpaper Change", "Pending Home Applied", "Folder Rescan", "Service Started", "Service Stopped", "Manual Change"
+    val status: String, // "SUCCESS", "PENDING", "FAILED", "INFO"
+    val details: String,
+    val wallpaperName: String? = null,
+    val wallpaperUri: String? = null
+)

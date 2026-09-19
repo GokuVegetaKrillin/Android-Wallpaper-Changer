@@ -27,10 +27,12 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.outlined.Circle
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -72,10 +74,12 @@ enum class SortMode {
 fun FolderPlaylistScreen(
     folder: FolderEntity,
     wallpapers: List<WallpaperEntity>,
+    isRescanning: Boolean = false,
     onBack: () -> Unit,
     onSelectWallpaper: (WallpaperEntity) -> Unit,
     onToggleInclusion: (WallpaperEntity) -> Unit,
     onSelectAll: (Boolean) -> Unit,
+    onRescanFolder: () -> Unit,
     onDeleteFolder: () -> Unit
 ) {
     var sortMode by remember { mutableStateOf(SortMode.DATE_ADDED) }
@@ -118,6 +122,24 @@ fun FolderPlaylistScreen(
                     }
                 },
                 actions = {
+                    // Rescan Folder Button
+                    IconButton(
+                        onClick = onRescanFolder,
+                        enabled = !isRescanning
+                    ) {
+                        if (isRescanning) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Sync,
+                                contentDescription = "Rescan folder for image additions and deletions"
+                            )
+                        }
+                    }
+
                     // Sort Icon
                     IconButton(onClick = {
                         sortMode = when (sortMode) {
@@ -144,6 +166,14 @@ fun FolderPlaylistScreen(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false }
                     ) {
+                        DropdownMenuItem(
+                            text = { Text("Rescan for New/Deleted Images") },
+                            leadingIcon = { Icon(Icons.Default.Sync, contentDescription = null) },
+                            onClick = {
+                                onRescanFolder()
+                                showMenu = false
+                            }
+                        )
                         DropdownMenuItem(
                             text = { Text("Include All in Slideshow") },
                             onClick = {

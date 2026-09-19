@@ -18,7 +18,9 @@ data class UserSettings(
     val scaleType: String = "MULTI_SCREEN_ADAPTIVE", // MULTI_SCREEN_ADAPTIVE, CENTER_CROP, FIT_SCREEN
     val lastChangedTimestamp: Long = 0L,
     val currentWallpaperUri: String? = null,
-    val currentWallpaperName: String? = null
+    val currentWallpaperName: String? = null,
+    val pendingHomeWallpaperUri: String? = null,
+    val pendingHomeWallpaperName: String? = null
 )
 
 class SettingsRepository(context: Context) {
@@ -41,7 +43,9 @@ class SettingsRepository(context: Context) {
             scaleType = prefs.getString("scale_type", "MULTI_SCREEN_ADAPTIVE") ?: "MULTI_SCREEN_ADAPTIVE",
             lastChangedTimestamp = prefs.getLong("last_changed_timestamp", 0L),
             currentWallpaperUri = prefs.getString("current_wallpaper_uri", null),
-            currentWallpaperName = prefs.getString("current_wallpaper_name", null)
+            currentWallpaperName = prefs.getString("current_wallpaper_name", null),
+            pendingHomeWallpaperUri = prefs.getString("pending_home_wallpaper_uri", null),
+            pendingHomeWallpaperName = prefs.getString("pending_home_wallpaper_name", null)
         )
     }
 
@@ -60,6 +64,8 @@ class SettingsRepository(context: Context) {
             putLong("last_changed_timestamp", updated.lastChangedTimestamp)
             putString("current_wallpaper_uri", updated.currentWallpaperUri)
             putString("current_wallpaper_name", updated.currentWallpaperName)
+            putString("pending_home_wallpaper_uri", updated.pendingHomeWallpaperUri)
+            putString("pending_home_wallpaper_name", updated.pendingHomeWallpaperName)
             apply()
         }
         _settings.value = updated

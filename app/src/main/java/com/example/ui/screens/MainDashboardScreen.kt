@@ -35,12 +35,15 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.LockClock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -90,6 +93,7 @@ import coil.compose.AsyncImage
 import com.example.data.local.FolderEntity
 import com.example.data.repository.UserSettings
 import com.example.ui.WallshowUiState
+import com.example.ui.components.OperationLogsDialog
 import com.example.ui.theme.WallshowStartGreen
 import com.example.ui.theme.WallshowStopRed
 
@@ -103,6 +107,10 @@ fun MainDashboardScreen(
     onAddFolder: (Uri) -> Unit,
     onAddPictures: (List<Uri>) -> Unit,
     onChangeWallpaperNow: () -> Unit,
+    onOpenLogs: () -> Unit,
+    onCloseLogs: () -> Unit,
+    onClearLogs: () -> Unit,
+    onRescanAll: () -> Unit,
     onClearMessage: () -> Unit
 ) {
     val context = LocalContext.current
@@ -146,13 +154,43 @@ fun MainDashboardScreen(
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "Wallshow",
+                            text = "Automatic Wallpaper Changer",
                             fontWeight = FontWeight.Bold,
-                            style = MaterialTheme.typography.titleLarge
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 },
                 actions = {
+                    // Rescan all folders
+                    IconButton(
+                        onClick = onRescanAll,
+                        enabled = !state.isRescanning
+                    ) {
+                        if (state.isRescanning) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Sync,
+                                contentDescription = "Rescan all folders for additions and removals",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    // Activity logs (24h)
+                    IconButton(onClick = onOpenLogs) {
+                        Icon(
+                            imageVector = Icons.Default.History,
+                            contentDescription = "Activity logs past 24 hours",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
                     // Battery Optimization dialog or check
                     IconButton(onClick = {
                         try {
@@ -248,7 +286,44 @@ fun MainDashboardScreen(
                 }
             }
 
-            // Quick Next Wallpaper button
+            // Pending wallpaper notification banner if locked deferred
+            if (state.settings.pendingHomeWallpaperUri != null) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF3E0)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LockClock,
+                            contentDescription = null,
+                            tint = Color(0xFFE65100),
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Home Wallpaper Deferred (Device Locked)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE65100)
+                            )
+                            Text(
+                                text = "\"${state.settings.pendingHomeWallpaperName ?: "Wallpaper"}\" will apply to home screen immediately when device is unlocked.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF5D4037)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Quick Next Wallpaper & Actions row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -277,6 +352,45 @@ fun MainDashboardScreen(
                         Icon(imageVector = Icons.Default.SkipNext, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Change Now", fontSize = 12.sp)
+                    }
+                }
+            }
+
+            // Quick Actions: 24h Activity Log | Sync Storage
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onOpenLogs,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("view_logs_button"),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                ) {
+                    Icon(imageVector = Icons.Default.History, contentDescription = null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Activity Log (${state.operationLogs.size})", fontSize = 12.sp)
+                }
+
+                OutlinedButton(
+                    onClick = onRescanAll,
+                    enabled = !state.isRescanning,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("rescan_folders_button"),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                ) {
+                    if (state.isRescanning) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(imageVector = Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Sync Folders", fontSize = 12.sp)
                     }
                 }
             }
@@ -560,6 +674,14 @@ fun MainDashboardScreen(
                 }
             }
         }
+    }
+
+    if (state.showLogsDialog) {
+        OperationLogsDialog(
+            logs = state.operationLogs,
+            onDismiss = onCloseLogs,
+            onClearLogs = onClearLogs
+        )
     }
 }
 

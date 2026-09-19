@@ -6,12 +6,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.WallshowApp
 import com.example.data.local.FolderEntity
+import com.example.data.local.OperationLogEntity
 import com.example.data.local.WallpaperEntity
 import com.example.data.repository.UserSettings
 import com.example.engine.WallpaperCropper
 import com.example.service.WallpaperChangerService
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -26,6 +26,9 @@ data class WallshowUiState(
     val settings: UserSettings = UserSettings(),
     val viewingWallpaper: WallpaperEntity? = null,
     val isSettingWallpaper: Boolean = false,
+    val isRescanning: Boolean = false,
+    val operationLogs: List<OperationLogEntity> = emptyList(),
+    val showLogsDialog: Boolean = false,
     val userMessage: String? = null
 )
 
@@ -39,6 +42,9 @@ class WallshowViewModel(application: Application) : AndroidViewModel(application
     private val _folderWallpapers = MutableStateFlow<List<WallpaperEntity>>(emptyList())
     private val _viewingWallpaper = MutableStateFlow<WallpaperEntity?>(null)
     private val _isSettingWallpaper = MutableStateFlow(false)
+    private val _isRescanning = MutableStateFlow(false)
+    private val _showLogsDialog = MutableStateFlow(false)
+    private val _operationLogs = MutableStateFlow<List<OperationLogEntity>>(emptyList())
     private val _userMessage = MutableStateFlow<String?>(null)
 
     private val _uiState = MutableStateFlow(WallshowUiState())
@@ -81,9 +87,30 @@ class WallshowViewModel(application: Application) : AndroidViewModel(application
             }
         }
         viewModelScope.launch {
+            _isRescanning.collectLatest { isRescanning ->
+                _uiState.update { it.copy(isRescanning = isRescanning) }
+            }
+        }
+        viewModelScope.launch {
+            _showLogsDialog.collectLatest { showLogs ->
+                _uiState.update { it.copy(showLogsDialog = showLogs) }
+            }
+        }
+        viewModelScope.launch {
+            repo.getPast24HourLogs().collectLatest { logs ->
+                _operationLogs.value = logs
+                _uiState.update { it.copy(operationLogs = logs) }
+            }
+        }
+        viewModelScope.launch {
             _userMessage.collectLatest { message ->
                 _uiState.update { it.copy(userMessage = message) }
             }
+        }
+
+        // Rescan folders on app open to catch any added or removed files automatically
+        viewModelScope.launch {
+            repo.rescanAllFolders()
         }
     }
 
@@ -116,11 +143,50 @@ class WallshowViewModel(application: Application) : AndroidViewModel(application
                 _folderWallpapers.value = list
             }
         }
+        // Rescan folder when user opens it to display fresh additions/removals immediately
+        viewModelScope.launch {
+            _isRescanning.value = true
+            val rescan = repo.rescanFolder(folder.uri)
+            _isRescanning.value = false
+            if (rescan.addedCount > 0 || rescan.removedCount > 0) {
+                _userMessage.value = "Folder synced: +${rescan.addedCount} new images queued, -${rescan.removedCount} removed."
+            }
+        }
+    }
+
+    fun rescanCurrentFolder() {
+        val current = _selectedFolder.value ?: return
+        viewModelScope.launch {
+            _isRescanning.value = true
+            val rescan = repo.rescanFolder(current.uri)
+            _isRescanning.value = false
+            _userMessage.value = "Folder synced: +${rescan.addedCount} new added to queue, -${rescan.removedCount} removed (Total: ${rescan.totalCount})"
+        }
+    }
+
+    fun rescanAllFolders() {
+        viewModelScope.launch {
+            _isRescanning.value = true
+            repo.rescanAllFolders()
+            _isRescanning.value = false
+            _userMessage.value = "All folders resynced with device storage."
+        }
     }
 
     fun closeFolder() {
         _selectedFolder.value = null
         _folderWallpapers.value = emptyList()
+    }
+
+    fun setShowLogsDialog(show: Boolean) {
+        _showLogsDialog.value = show
+    }
+
+    fun clearLogs() {
+        viewModelScope.launch {
+            repo.clearLogs()
+            _userMessage.value = "Activity logs cleared."
+        }
     }
 
     fun addFolder(uri: Uri) {
@@ -196,7 +262,7 @@ class WallshowViewModel(application: Application) : AndroidViewModel(application
 
             if (cropAndBitmap != null) {
                 val (bitmap, _) = cropAndBitmap
-                val success = WallpaperCropper.applyAsWallpaper(
+                val applyResult = WallpaperCropper.applyAsWallpaper(
                     context = getApplication(),
                     croppedBitmap = bitmap,
                     target = target,
@@ -205,16 +271,36 @@ class WallshowViewModel(application: Application) : AndroidViewModel(application
                 )
                 bitmap.recycle()
 
-                if (success) {
+                if (applyResult.anyApplied) {
                     settingsRepo.updateSettings {
                         it.copy(
                             currentWallpaperUri = wallpaper.uri,
                             currentWallpaperName = wallpaper.displayName,
-                            homeScreenCount = homeScreens
+                            homeScreenCount = homeScreens,
+                            pendingHomeWallpaperUri = if (target != "LOCK_ONLY" && !applyResult.homeApplied) wallpaper.uri else null,
+                            pendingHomeWallpaperName = if (target != "LOCK_ONLY" && !applyResult.homeApplied) wallpaper.displayName else null
                         )
                     }
-                    _userMessage.value = "Wallpaper updated successfully!"
+                    repo.logOperation(
+                        action = "Manual Change",
+                        status = if (applyResult.isFullyApplied) "SUCCESS" else "PENDING",
+                        details = "Manual change: applied to target $target (home=${applyResult.homeApplied} [ID=${applyResult.homeId}], lock=${applyResult.lockApplied} [ID=${applyResult.lockId}], locked=${applyResult.isKeyguardLocked})",
+                        wallpaperName = wallpaper.displayName,
+                        wallpaperUri = wallpaper.uri
+                    )
+                    _userMessage.value = if (applyResult.isFullyApplied) {
+                        "Wallpaper set successfully!"
+                    } else {
+                        "Lock wallpaper applied; home screen queued for device unlock."
+                    }
                 } else {
+                    repo.logOperation(
+                        action = "Manual Change",
+                        status = "FAILED",
+                        details = "Failed to set manual wallpaper: ${applyResult.errorMessage ?: "setBitmap returned 0"}",
+                        wallpaperName = wallpaper.displayName,
+                        wallpaperUri = wallpaper.uri
+                    )
                     _userMessage.value = "Failed to set wallpaper."
                 }
             } else {
@@ -230,7 +316,7 @@ class WallshowViewModel(application: Application) : AndroidViewModel(application
             val success = repo.changeToNextWallpaper()
             _isSettingWallpaper.value = false
             if (success) {
-                _userMessage.value = "Changed to next wallpaper!"
+                _userMessage.value = "Wallpaper updated!"
             } else {
                 _userMessage.value = "No active wallpapers found to set."
             }

@@ -86,10 +86,12 @@ class MainActivity : ComponentActivity() {
                                 FolderPlaylistScreen(
                                     folder = state.selectedFolder!!,
                                     wallpapers = state.folderWallpapers,
+                                    isRescanning = state.isRescanning,
                                     onBack = { viewModel.closeFolder() },
                                     onSelectWallpaper = { viewModel.openWallpaperDetail(it) },
                                     onToggleInclusion = { viewModel.toggleWallpaperInclusion(it) },
                                     onSelectAll = { viewModel.selectAllInFolder(it) },
+                                    onRescanFolder = { viewModel.rescanCurrentFolder() },
                                     onDeleteFolder = { viewModel.deleteFolder(state.selectedFolder!!.uri) }
                                 )
                             }
@@ -102,6 +104,10 @@ class MainActivity : ComponentActivity() {
                                     onAddFolder = { viewModel.addFolder(it) },
                                     onAddPictures = { viewModel.addPictures(it) },
                                     onChangeWallpaperNow = { viewModel.changeToNextWallpaperNow() },
+                                    onOpenLogs = { viewModel.setShowLogsDialog(true) },
+                                    onCloseLogs = { viewModel.setShowLogsDialog(false) },
+                                    onClearLogs = { viewModel.clearLogs() },
+                                    onRescanAll = { viewModel.rescanAllFolders() },
                                     onClearMessage = { viewModel.clearMessage() }
                                 )
                             }

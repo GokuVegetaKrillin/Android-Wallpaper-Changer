@@ -1,5 +1,6 @@
 package com.example.engine
 
+import android.app.KeyguardManager
 import android.app.WallpaperManager
 import android.content.Context
 import android.graphics.Bitmap
@@ -11,6 +12,7 @@ import android.graphics.RectF
 import android.net.Uri
 import android.os.Build
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.WindowManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -33,6 +35,23 @@ data class CropResult(
     val overlapRatio: Float,
     val summary: String
 )
+
+data class WallpaperApplyResult(
+    val homeApplied: Boolean,
+    val lockApplied: Boolean,
+    val homeId: Int,
+    val lockId: Int,
+    val isKeyguardLocked: Boolean,
+    val target: String,
+    val errorMessage: String? = null
+) {
+    val isFullyApplied: Boolean get() = when (target) {
+        "HOME_ONLY" -> homeApplied
+        "LOCK_ONLY" -> lockApplied
+        else -> homeApplied && lockApplied
+    }
+    val anyApplied: Boolean get() = homeApplied || lockApplied
+}
 
 object WallpaperCropper {
 
@@ -299,6 +318,7 @@ object WallpaperCropper {
     /**
      * Applies the cropped bitmap to WallpaperManager.
      * target: "BOTH", "HOME_ONLY", "LOCK_ONLY"
+     * Returns WallpaperApplyResult with detailed return codes and lock state.
      */
     suspend fun applyAsWallpaper(
         context: Context,
@@ -306,24 +326,31 @@ object WallpaperCropper {
         target: String,
         screenWidth: Int,
         screenHeight: Int
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): WallpaperApplyResult = withContext(Dispatchers.IO) {
         try {
             val wallpaperManager = WallpaperManager.getInstance(context)
+            val keyguard = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+            val isLocked = keyguard?.isKeyguardLocked == true
 
-            // Suggest dimensions for smooth scrolling if setting home screen
-            try {
-                wallpaperManager.suggestDesiredDimensions(
-                    max(screenWidth, croppedBitmap.width),
-                    max(screenHeight, croppedBitmap.height)
-                )
-            } catch (e: Exception) {
-                // Ignore failure on some devices/permissions
-            }
+            val isSupported = wallpaperManager.isWallpaperSupported
+            val isAllowed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                wallpaperManager.isSetWallpaperAllowed
+            } else true
+
+            Log.d(
+                "WallpaperChanger",
+                "applyAsWallpaper: target=$target, isLocked=$isLocked, supported=$isSupported, allowed=$isAllowed, bmp=${croppedBitmap.width}x${croppedBitmap.height}"
+            )
+
+            var homeId = 0
+            var lockId = 0
+            var homeApplied = false
+            var lockApplied = false
 
             when (target) {
                 "HOME_ONLY" -> {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        wallpaperManager.setBitmap(
+                        homeId = wallpaperManager.setBitmap(
                             croppedBitmap,
                             null,
                             true,
@@ -331,13 +358,15 @@ object WallpaperCropper {
                         )
                     } else {
                         wallpaperManager.setBitmap(croppedBitmap)
+                        homeId = 1
                     }
+                    homeApplied = homeId != 0
+                    Log.d("WallpaperChanger", "HOME_ONLY setBitmap returned ID=$homeId (applied=$homeApplied, locked=$isLocked)")
                 }
                 "LOCK_ONLY" -> {
-                    // For lock screen, crop central single screen from the wallpaper
                     val lockBitmap = extractCenterScreen(croppedBitmap, screenWidth, screenHeight)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        wallpaperManager.setBitmap(
+                        lockId = wallpaperManager.setBitmap(
                             lockBitmap,
                             null,
                             true,
@@ -345,40 +374,78 @@ object WallpaperCropper {
                         )
                     } else {
                         wallpaperManager.setBitmap(lockBitmap)
+                        lockId = 1
                     }
+                    lockApplied = lockId != 0
+                    Log.d("WallpaperChanger", "LOCK_ONLY setBitmap returned ID=$lockId (applied=$lockApplied)")
                     if (lockBitmap != croppedBitmap) {
                         lockBitmap.recycle()
                     }
                 }
                 "BOTH" -> {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        // Home screen gets full multi-screen cropped bitmap
-                        wallpaperManager.setBitmap(
-                            croppedBitmap,
-                            null,
-                            true,
-                            WallpaperManager.FLAG_SYSTEM
-                        )
-                        // Lock screen gets centered single-screen portion
+                        // 1. Apply home screen independently
+                        try {
+                            homeId = wallpaperManager.setBitmap(
+                                croppedBitmap,
+                                null,
+                                true,
+                                WallpaperManager.FLAG_SYSTEM
+                            )
+                            homeApplied = homeId != 0
+                        } catch (e: Exception) {
+                            Log.e("WallpaperChanger", "Failed setting home wallpaper in BOTH mode", e)
+                        }
+                        Log.d("WallpaperChanger", "BOTH mode: HOME setBitmap returned ID=$homeId (applied=$homeApplied, locked=$isLocked)")
+
+                        // 2. Apply lock screen independently
                         val lockBitmap = extractCenterScreen(croppedBitmap, screenWidth, screenHeight)
-                        wallpaperManager.setBitmap(
-                            lockBitmap,
-                            null,
-                            true,
-                            WallpaperManager.FLAG_LOCK
-                        )
+                        try {
+                            lockId = wallpaperManager.setBitmap(
+                                lockBitmap,
+                                null,
+                                true,
+                                WallpaperManager.FLAG_LOCK
+                            )
+                            lockApplied = lockId != 0
+                        } catch (e: Exception) {
+                            Log.e("WallpaperChanger", "Failed setting lock wallpaper in BOTH mode", e)
+                        }
+                        Log.d("WallpaperChanger", "BOTH mode: LOCK setBitmap returned ID=$lockId (applied=$lockApplied)")
+
                         if (lockBitmap != croppedBitmap) {
                             lockBitmap.recycle()
                         }
                     } else {
                         wallpaperManager.setBitmap(croppedBitmap)
+                        homeId = 1
+                        lockId = 1
+                        homeApplied = true
+                        lockApplied = true
                     }
                 }
             }
-            true
+
+            WallpaperApplyResult(
+                homeApplied = homeApplied,
+                lockApplied = lockApplied,
+                homeId = homeId,
+                lockId = lockId,
+                isKeyguardLocked = isLocked,
+                target = target,
+                errorMessage = if (!homeApplied && !lockApplied) "setBitmap returned 0 for target: $target" else null
+            )
         } catch (e: Exception) {
-            e.printStackTrace()
-            false
+            Log.e("WallpaperChanger", "Exception in applyAsWallpaper", e)
+            WallpaperApplyResult(
+                homeApplied = false,
+                lockApplied = false,
+                homeId = 0,
+                lockId = 0,
+                isKeyguardLocked = false,
+                target = target,
+                errorMessage = e.localizedMessage ?: "Unknown error"
+            )
         }
     }
 

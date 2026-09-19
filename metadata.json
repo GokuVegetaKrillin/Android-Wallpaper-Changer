@@ -1,6 +1,6 @@
 {
-  "name": "Wallshow",
-  "description": "Automatic wallpaper changer with multi-home-screen aspect-ratio adaptive cropping, custom folder playlists, and background scheduling.",
+  "name": "Automatic Wallpaper Changer",
+  "description": "Automatic wallpaper changer with multi-screen aspect-ratio adaptive cropping, custom folder sync & playlists, 24-hour operation logs, and background scheduling.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

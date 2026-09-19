@@ -8,13 +8,20 @@ import androidx.documentfile.provider.DocumentFile
 import com.example.R
 import com.example.data.local.AppDatabase
 import com.example.data.local.FolderEntity
+import com.example.data.local.OperationLogEntity
 import com.example.data.local.WallpaperEntity
+import com.example.engine.WallpaperApplyResult
 import com.example.engine.WallpaperCropper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
+
+data class RescanResult(
+    val folderName: String,
+    val addedCount: Int,
+    val removedCount: Int,
+    val totalCount: Int
+)
 
 class WallpaperRepository(
     private val context: Context,
@@ -23,18 +30,50 @@ class WallpaperRepository(
 ) {
     private val folderDao = database.folderDao()
     private val wallpaperDao = database.wallpaperDao()
+    private val operationLogDao = database.operationLogDao()
 
     val allFolders: Flow<List<FolderEntity>> = folderDao.getAllFolders()
     val allWallpapers: Flow<List<WallpaperEntity>> = wallpaperDao.getAllWallpapers()
     val activeSlideshowWallpapers: Flow<List<WallpaperEntity>> = wallpaperDao.getActiveSlideshowWallpapers()
 
+    fun getPast24HourLogs(): Flow<List<OperationLogEntity>> {
+        val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
+        return operationLogDao.getLogsSince(cutoff)
+    }
+
+    suspend fun logOperation(
+        action: String,
+        status: String,
+        details: String,
+        wallpaperName: String? = null,
+        wallpaperUri: String? = null
+    ) = withContext(Dispatchers.IO) {
+        try {
+            val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
+            operationLogDao.pruneLogsOlderThan(cutoff)
+            operationLogDao.insertLog(
+                OperationLogEntity(
+                    timestamp = System.currentTimeMillis(),
+                    action = action,
+                    status = status,
+                    details = details,
+                    wallpaperName = wallpaperName,
+                    wallpaperUri = wallpaperUri
+                )
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    suspend fun clearLogs() = withContext(Dispatchers.IO) {
+        operationLogDao.clearAllLogs()
+    }
+
     fun getWallpapersForFolder(folderUri: String): Flow<List<WallpaperEntity>> =
         wallpaperDao.getWallpapersForFolder(folderUri)
 
     suspend fun initializeDefaultWallpapersIfEmpty() = withContext(Dispatchers.IO) {
-        val existingFolders = folderDao.getAllFolders()
-        val count = wallpaperDao.getAllWallpapers()
-        // Check if DB is already seeded
         val activeCount = wallpaperDao.getActiveSlideshowWallpapersList().size
         if (activeCount > 0) return@withContext
 
@@ -81,10 +120,10 @@ class WallpaperRepository(
             )
         }
         wallpaperDao.insertWallpapers(wallpaperEntities)
+        logOperation("Initialization", "INFO", "Initialized default sample collection with 3 wallpapers")
     }
 
     suspend fun addFolderTree(treeUri: Uri): String = withContext(Dispatchers.IO) {
-        // Take persistable permission
         try {
             val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
             context.contentResolver.takePersistableUriPermission(treeUri, flags)
@@ -126,7 +165,121 @@ class WallpaperRepository(
         folderDao.insertFolder(folderEntity)
         wallpaperDao.insertWallpapers(wallpaperEntities)
 
+        logOperation(
+            action = "Folder Added",
+            status = "SUCCESS",
+            details = "Added folder \"$folderName\" with ${wallpaperEntities.size} images to queue"
+        )
+
         return@withContext folderName
+    }
+
+    suspend fun rescanFolder(folderUriStr: String): RescanResult = withContext(Dispatchers.IO) {
+        val folder = folderDao.getFolderByUri(folderUriStr) ?: return@withContext RescanResult("Unknown", 0, 0, 0)
+
+        // Sample pack is static
+        if (folderUriStr.startsWith("wallshow://sample_pack")) {
+            val total = wallpaperDao.getWallpaperCountForFolder(folderUriStr)
+            return@withContext RescanResult(folder.name, 0, 0, total)
+        }
+
+        // Custom picked selection check
+        if (folderUriStr.startsWith("wallshow://custom_selection")) {
+            val existing = wallpaperDao.getWallpapersForFolderList(folderUriStr)
+            var removed = 0
+            for (w in existing) {
+                val exists = try {
+                    context.contentResolver.openInputStream(Uri.parse(w.uri))?.use { true } ?: false
+                } catch (e: Exception) {
+                    false
+                }
+                if (!exists) {
+                    wallpaperDao.deleteWallpaperByUri(w.uri)
+                    removed++
+                }
+            }
+            val total = wallpaperDao.getWallpaperCountForFolder(folderUriStr)
+            folderDao.updateFolder(folder.copy(imageCount = total))
+            if (removed > 0) {
+                logOperation("Folder Rescan", "INFO", "Rescanned custom pictures: -$removed inaccessible images removed (Total: $total)")
+            }
+            return@withContext RescanResult(folder.name, 0, removed, total)
+        }
+
+        // Document tree folder rescan
+        val treeUri = Uri.parse(folderUriStr)
+        val documentFile = DocumentFile.fromTreeUri(context, treeUri)
+        if (documentFile == null || !documentFile.exists()) {
+            val total = wallpaperDao.getWallpaperCountForFolder(folderUriStr)
+            return@withContext RescanResult(folder.name, 0, 0, total)
+        }
+
+        val diskFiles = mutableListOf<DocumentFile>()
+        scanDocumentFiles(documentFile, diskFiles)
+
+        val diskMap = diskFiles.associateBy { it.uri.toString() }
+        val existingInDb = wallpaperDao.getWallpapersForFolderList(folderUriStr)
+        val existingMap = existingInDb.associateBy { it.uri }
+
+        var removedCount = 0
+        for (existingW in existingInDb) {
+            if (!diskMap.containsKey(existingW.uri)) {
+                wallpaperDao.deleteWallpaperByUri(existingW.uri)
+                removedCount++
+            }
+        }
+
+        var addedCount = 0
+        val newEntities = mutableListOf<WallpaperEntity>()
+        for ((uriStr, doc) in diskMap) {
+            if (!existingMap.containsKey(uriStr)) {
+                val (w, h) = WallpaperCropper.decodeImageBounds(context, uriStr)
+                newEntities.add(
+                    WallpaperEntity(
+                        uri = uriStr,
+                        folderUri = folderUriStr,
+                        displayName = doc.name ?: "image",
+                        width = w,
+                        height = h,
+                        sizeBytes = doc.length(),
+                        isIncludedInSlideshow = true // Automatically added to queue!
+                    )
+                )
+                addedCount++
+            }
+        }
+
+        if (newEntities.isNotEmpty()) {
+            wallpaperDao.insertWallpapers(newEntities)
+        }
+
+        val totalCount = wallpaperDao.getWallpaperCountForFolder(folderUriStr)
+        val updatedList = wallpaperDao.getWallpapersForFolderList(folderUriStr)
+        val newCover = updatedList.firstOrNull()?.uri ?: folder.coverUri
+
+        folderDao.updateFolder(
+            folder.copy(
+                imageCount = totalCount,
+                coverUri = newCover
+            )
+        )
+
+        if (addedCount > 0 || removedCount > 0) {
+            logOperation(
+                action = "Folder Rescan",
+                status = "SUCCESS",
+                details = "Rescanned \"${folder.name}\": +$addedCount new images added to queue, -$removedCount removed (Total: $totalCount)"
+            )
+        }
+
+        RescanResult(folder.name, addedCount, removedCount, totalCount)
+    }
+
+    suspend fun rescanAllFolders() = withContext(Dispatchers.IO) {
+        val folders = folderDao.getAllFoldersList()
+        for (f in folders) {
+            rescanFolder(f.uri)
+        }
     }
 
     private fun scanDocumentFiles(dir: DocumentFile?, result: MutableList<DocumentFile>) {
@@ -134,7 +287,6 @@ class WallpaperRepository(
         val files = dir.listFiles()
         for (f in files) {
             if (f.isDirectory) {
-                // optionally scan 1 level deeper
                 scanDocumentFiles(f, result)
             } else {
                 val mime = f.type ?: ""
@@ -193,6 +345,11 @@ class WallpaperRepository(
                 coverUri = list.firstOrNull()?.uri ?: existing.coverUri
             )
         )
+        logOperation(
+            action = "Pictures Added",
+            status = "SUCCESS",
+            details = "Added ${list.size} individual pictures to custom collection"
+        )
         list.size
     }
 
@@ -202,12 +359,15 @@ class WallpaperRepository(
         }
 
     suspend fun deleteFolder(folderUri: String) = withContext(Dispatchers.IO) {
+        val folder = folderDao.getFolderByUri(folderUri)
+        val name = folder?.name ?: "Folder"
         wallpaperDao.deleteWallpapersForFolder(folderUri)
         folderDao.deleteFolderByUri(folderUri)
+        logOperation("Folder Deleted", "INFO", "Removed folder \"$name\" and its wallpapers from app")
     }
 
     /**
-     * Executes changing to the next wallpaper (either triggered by schedule or manual button)
+     * Executes changing to the next wallpaper (either triggered by schedule, alarm, unlock, or manual button)
      */
     suspend fun changeToNextWallpaper(): Boolean = withContext(Dispatchers.IO) {
         val settings = settingsRepository.getDirectSettings()
@@ -222,7 +382,14 @@ class WallpaperRepository(
             }
         }
 
-        if (candidates.isEmpty()) return@withContext false
+        if (candidates.isEmpty()) {
+            logOperation(
+                action = "Wallpaper Rotation",
+                status = "FAILED",
+                details = "No active wallpapers available in slideshow queue"
+            )
+            return@withContext false
+        }
 
         val nextWallpaper = if (settings.shuffle) {
             val currentUri = settings.currentWallpaperUri
@@ -238,7 +405,6 @@ class WallpaperRepository(
             }
         }
 
-        // Apply it using the multi-screen cropping engine!
         val (screenWidth, screenHeight) = WallpaperCropper.getScreenDimensions(context)
         val result = WallpaperCropper.loadAndCropBitmap(
             context = context,
@@ -248,28 +414,136 @@ class WallpaperRepository(
             homeScreenCount = settings.homeScreenCount
         )
 
-        if (result != null) {
-            val (bitmap, _) = result
-            val success = WallpaperCropper.applyAsWallpaper(
-                context = context,
-                croppedBitmap = bitmap,
-                target = settings.slideshowTarget,
-                screenWidth = screenWidth,
-                screenHeight = screenHeight
+        if (result == null) {
+            logOperation(
+                action = "Wallpaper Rotation",
+                status = "FAILED",
+                details = "Could not decode or crop image bitmap for \"${nextWallpaper.displayName}\"",
+                wallpaperName = nextWallpaper.displayName,
+                wallpaperUri = nextWallpaper.uri
             )
-            bitmap.recycle()
-
-            if (success) {
-                settingsRepository.updateSettings {
-                    it.copy(
-                        lastChangedTimestamp = System.currentTimeMillis(),
-                        currentWallpaperUri = nextWallpaper.uri,
-                        currentWallpaperName = nextWallpaper.displayName
-                    )
-                }
-                return@withContext true
-            }
+            return@withContext false
         }
-        false
+
+        val (bitmap, _) = result
+        val applyResult = WallpaperCropper.applyAsWallpaper(
+            context = context,
+            croppedBitmap = bitmap,
+            target = settings.slideshowTarget,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight
+        )
+        bitmap.recycle()
+
+        val target = settings.slideshowTarget
+        val homeNeeded = target == "BOTH" || target == "HOME_ONLY"
+        val lockNeeded = target == "BOTH" || target == "LOCK_ONLY"
+
+        if (homeNeeded && !applyResult.homeApplied) {
+            // Home screen failed (e.g. device is locked)! Save as pending home wallpaper for unlock
+            settingsRepository.updateSettings {
+                it.copy(
+                    pendingHomeWallpaperUri = nextWallpaper.uri,
+                    pendingHomeWallpaperName = nextWallpaper.displayName,
+                    lastChangedTimestamp = System.currentTimeMillis()
+                )
+            }
+            val details = if (lockNeeded && applyResult.lockApplied) {
+                "Lock screen changed (ID=${applyResult.lockId}). Home screen deferred (device locked=${applyResult.isKeyguardLocked}, Home ID=${applyResult.homeId}); saved to apply on unlock."
+            } else {
+                "Home screen change deferred (device locked=${applyResult.isKeyguardLocked}, Home ID=${applyResult.homeId}); saved to apply on unlock."
+            }
+            logOperation(
+                action = "Wallpaper Rotation",
+                status = "PENDING",
+                details = details,
+                wallpaperName = nextWallpaper.displayName,
+                wallpaperUri = nextWallpaper.uri
+            )
+            return@withContext applyResult.anyApplied
+        } else {
+            // Home succeeded (or was not requested)
+            settingsRepository.updateSettings {
+                it.copy(
+                    pendingHomeWallpaperUri = null,
+                    pendingHomeWallpaperName = null,
+                    currentWallpaperUri = nextWallpaper.uri,
+                    currentWallpaperName = nextWallpaper.displayName,
+                    lastChangedTimestamp = System.currentTimeMillis()
+                )
+            }
+
+            val details = when (target) {
+                "HOME_ONLY" -> "Applied to Home screen (Home ID=${applyResult.homeId}, locked=${applyResult.isKeyguardLocked})"
+                "LOCK_ONLY" -> "Applied to Lock screen (Lock ID=${applyResult.lockId})"
+                else -> "Applied to both Home (ID=${applyResult.homeId}) & Lock screen (ID=${applyResult.lockId}, locked=${applyResult.isKeyguardLocked})"
+            }
+
+            logOperation(
+                action = "Wallpaper Rotation",
+                status = if (applyResult.isFullyApplied) "SUCCESS" else "WARNING",
+                details = details,
+                wallpaperName = nextWallpaper.displayName,
+                wallpaperUri = nextWallpaper.uri
+            )
+            return@withContext applyResult.anyApplied
+        }
+    }
+
+    /**
+     * Applies the queued pending home wallpaper if device was locked during a previous change.
+     */
+    suspend fun applyPendingHomeWallpaperIfNeeded(): Boolean = withContext(Dispatchers.IO) {
+        val settings = settingsRepository.getDirectSettings()
+        val pendingUri = settings.pendingHomeWallpaperUri ?: return@withContext false
+        val pendingName = settings.pendingHomeWallpaperName ?: "Pending Wallpaper"
+
+        val (screenWidth, screenHeight) = WallpaperCropper.getScreenDimensions(context)
+        val result = WallpaperCropper.loadAndCropBitmap(
+            context = context,
+            uriString = pendingUri,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            homeScreenCount = settings.homeScreenCount
+        ) ?: return@withContext false
+
+        val (bitmap, _) = result
+        val applyResult = WallpaperCropper.applyAsWallpaper(
+            context = context,
+            croppedBitmap = bitmap,
+            target = "HOME_ONLY",
+            screenWidth = screenWidth,
+            screenHeight = screenHeight
+        )
+        bitmap.recycle()
+
+        if (applyResult.homeApplied) {
+            settingsRepository.updateSettings {
+                it.copy(
+                    pendingHomeWallpaperUri = null,
+                    pendingHomeWallpaperName = null,
+                    currentWallpaperUri = pendingUri,
+                    currentWallpaperName = pendingName,
+                    lastChangedTimestamp = System.currentTimeMillis()
+                )
+            }
+            logOperation(
+                action = "Pending Home Applied",
+                status = "SUCCESS",
+                details = "Device unlocked: Applied pending home wallpaper \"$pendingName\" (Home ID=${applyResult.homeId})",
+                wallpaperName = pendingName,
+                wallpaperUri = pendingUri
+            )
+            true
+        } else {
+            logOperation(
+                action = "Pending Home Applied",
+                status = "FAILED",
+                details = "Device unlocked: Failed to apply pending home wallpaper \"$pendingName\" (Home ID=${applyResult.homeId}, locked=${applyResult.isKeyguardLocked})",
+                wallpaperName = pendingName,
+                wallpaperUri = pendingUri
+            )
+            false
+        }
     }
 }

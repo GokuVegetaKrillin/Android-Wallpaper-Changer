@@ -44,6 +44,10 @@ class GreetingScreenshotTest {
                     onAddFolder = {},
                     onAddPictures = {},
                     onChangeWallpaperNow = {},
+                    onOpenLogs = {},
+                    onCloseLogs = {},
+                    onClearLogs = {},
+                    onRescanAll = {},
                     onClearMessage = {}
                 )
             }

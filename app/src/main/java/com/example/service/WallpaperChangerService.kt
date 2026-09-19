@@ -88,8 +88,19 @@ class WallpaperChangerService : Service() {
         // Schedule WorkManager as reliable backup / reboot keeper
         WallpaperChangerWorker.schedulePeriodic(this, currentSettings.intervalMinutes)
 
+        // Schedule AlarmManager for exact battery-safe wakes
+        AlarmScheduler.scheduleNextAlarm(this, currentSettings.intervalMinutes)
+
         // Observe settings changes (interval, triggers, targets)
         observeSettings()
+
+        serviceScope.launch {
+            app.wallpaperRepository.logOperation(
+                action = "Service Started",
+                status = "INFO",
+                details = "Wallpaper changer service active (interval: ${currentSettings.intervalMinutes}m, target: ${currentSettings.slideshowTarget})"
+            )
+        }
 
         return START_STICKY
     }
@@ -110,6 +121,9 @@ class WallpaperChangerService : Service() {
 
                 // Reschedule WorkManager
                 WallpaperChangerWorker.schedulePeriodic(this@WallpaperChangerService, settings.intervalMinutes)
+
+                // Reschedule AlarmManager
+                AlarmScheduler.scheduleNextAlarm(this@WallpaperChangerService, settings.intervalMinutes)
 
                 // Restart ticker with new interval
                 startTicker(settings.intervalMinutes)
@@ -146,10 +160,11 @@ class WallpaperChangerService : Service() {
                     if (intent?.action == Intent.ACTION_USER_PRESENT) {
                         val app = applicationContext as WallshowApp
                         val settings = app.settingsRepository.getDirectSettings()
-                        if (settings.serviceRunning &&
-                            (settings.changeTrigger == "LOCK_UNLOCK" || settings.changeTrigger == "BOTH")
-                        ) {
-                            serviceScope.launch {
+                        serviceScope.launch {
+                            val handledPending = app.wallpaperRepository.applyPendingHomeWallpaperIfNeeded()
+                            if (!handledPending && settings.serviceRunning &&
+                                (settings.changeTrigger == "LOCK_UNLOCK" || settings.changeTrigger == "BOTH")
+                            ) {
                                 app.wallpaperRepository.changeToNextWallpaper()
                             }
                         }
@@ -201,7 +216,7 @@ class WallpaperChangerService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.wallshow_launcher_icon_1789793535524)
-            .setContentTitle("Wallshow: Wallpaper Rotation Active")
+            .setContentTitle("Automatic Wallpaper Changer: Active")
             .setContentText(content)
             .setContentIntent(openAppPendingIntent)
             .setOngoing(true)
@@ -257,8 +272,17 @@ class WallpaperChangerService : Service() {
             if (wakeLock?.isHeld == true) wakeLock?.release()
         } catch (e: Exception) {}
 
-        // Cancel periodic work
+        // Cancel alarms and periodic work
+        AlarmScheduler.cancelAlarm(this)
         WallpaperChangerWorker.cancelPeriodic(this)
+
+        serviceScope.launch {
+            app.wallpaperRepository.logOperation(
+                action = "Service Stopped",
+                status = "INFO",
+                details = "Wallpaper changer service stopped"
+            )
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
