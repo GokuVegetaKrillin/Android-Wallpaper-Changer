@@ -643,12 +643,14 @@ fun SettingIntervalDropdown(
 ) {
     var expanded by remember { mutableStateOf(false) }
     val options = listOf(
+        1L to "Every 1 minutes",
+        5L to "Every 5 minutes",
         15L to "Every 15 minutes",
         30L to "Every 30 minutes",
         60L to "Every 1 hour",
         180L to "Every 3 hours",
         360L to "Every 6 hours",
-        600L to "Every 10 hours",
+        720L to "Every 12 hours",
         1440L to "Every 1 day (00:00 AM)",
         10080L to "Every 1 week"
     )
