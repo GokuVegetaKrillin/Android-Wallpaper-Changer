@@ -16,9 +16,8 @@ class BootReceiver : BroadcastReceiver() {
             val settings = app.settingsRepository.getDirectSettings()
 
             if (settings.serviceRunning) {
-                // Restart service or schedule work
+                // Restart service which schedules AlarmManager
                 WallpaperChangerService.startService(context)
-                WallpaperChangerWorker.schedulePeriodic(context, settings.intervalMinutes)
             }
         }
     }

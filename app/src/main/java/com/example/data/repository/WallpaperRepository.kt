@@ -14,6 +14,8 @@ import com.example.engine.WallpaperApplyResult
 import com.example.engine.WallpaperCropper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 data class RescanResult(
@@ -31,6 +33,7 @@ class WallpaperRepository(
     private val folderDao = database.folderDao()
     private val wallpaperDao = database.wallpaperDao()
     private val operationLogDao = database.operationLogDao()
+    private val rotationMutex = Mutex()
 
     val allFolders: Flow<List<FolderEntity>> = folderDao.getAllFolders()
     val allWallpapers: Flow<List<WallpaperEntity>> = wallpaperDao.getAllWallpapers()
@@ -370,123 +373,140 @@ class WallpaperRepository(
      * Executes changing to the next wallpaper (either triggered by schedule, alarm, unlock, or manual button)
      */
     suspend fun changeToNextWallpaper(): Boolean = withContext(Dispatchers.IO) {
-        val settings = settingsRepository.getDirectSettings()
-        var candidates = wallpaperDao.getActiveSlideshowWallpapersList()
+        rotationMutex.withLock {
+            val settings = settingsRepository.getDirectSettings()
+            var candidates = wallpaperDao.getActiveSlideshowWallpapersList()
 
-        // Filter by minImageDimension if set
-        if (settings.minImageDimension > 0) {
-            val minDim = settings.minImageDimension
-            val filtered = candidates.filter { it.width >= minDim && it.height >= minDim }
-            if (filtered.isNotEmpty()) {
-                candidates = filtered
+            // Filter by minImageDimension if set
+            if (settings.minImageDimension > 0) {
+                val minDim = settings.minImageDimension
+                val filtered = candidates.filter { it.width >= minDim && it.height >= minDim }
+                if (filtered.isNotEmpty()) {
+                    candidates = filtered
+                }
             }
-        }
 
-        if (candidates.isEmpty()) {
-            logOperation(
-                action = "Wallpaper Rotation",
-                status = "FAILED",
-                details = "No active wallpapers available in slideshow queue"
-            )
-            return@withContext false
-        }
-
-        val nextWallpaper = if (settings.shuffle) {
-            val currentUri = settings.currentWallpaperUri
-            val others = candidates.filter { it.uri != currentUri }
-            if (others.isNotEmpty()) others.random() else candidates.random()
-        } else {
-            val currentUri = settings.currentWallpaperUri
-            val currentIndex = candidates.indexOfFirst { it.uri == currentUri }
-            if (currentIndex in 0 until candidates.size - 1) {
-                candidates[currentIndex + 1]
-            } else {
-                candidates[0]
-            }
-        }
-
-        val (screenWidth, screenHeight) = WallpaperCropper.getScreenDimensions(context)
-        val result = WallpaperCropper.loadAndCropBitmap(
-            context = context,
-            uriString = nextWallpaper.uri,
-            screenWidth = screenWidth,
-            screenHeight = screenHeight,
-            homeScreenCount = settings.homeScreenCount
-        )
-
-        if (result == null) {
-            logOperation(
-                action = "Wallpaper Rotation",
-                status = "FAILED",
-                details = "Could not decode or crop image bitmap for \"${nextWallpaper.displayName}\"",
-                wallpaperName = nextWallpaper.displayName,
-                wallpaperUri = nextWallpaper.uri
-            )
-            return@withContext false
-        }
-
-        val (bitmap, _) = result
-        val applyResult = WallpaperCropper.applyAsWallpaper(
-            context = context,
-            croppedBitmap = bitmap,
-            target = settings.slideshowTarget,
-            screenWidth = screenWidth,
-            screenHeight = screenHeight
-        )
-        bitmap.recycle()
-
-        val target = settings.slideshowTarget
-        val homeNeeded = target == "BOTH" || target == "HOME_ONLY"
-        val lockNeeded = target == "BOTH" || target == "LOCK_ONLY"
-
-        if (homeNeeded && !applyResult.homeApplied) {
-            // Home screen failed (e.g. device is locked)! Save as pending home wallpaper for unlock
-            settingsRepository.updateSettings {
-                it.copy(
-                    pendingHomeWallpaperUri = nextWallpaper.uri,
-                    pendingHomeWallpaperName = nextWallpaper.displayName,
-                    lastChangedTimestamp = System.currentTimeMillis()
+            if (candidates.isEmpty()) {
+                logOperation(
+                    action = "Wallpaper Rotation",
+                    status = "FAILED",
+                    details = "No active wallpapers available in slideshow queue"
                 )
+                return@withLock false
             }
-            val details = if (lockNeeded && applyResult.lockApplied) {
-                "Lock screen changed (ID=${applyResult.lockId}). Home screen deferred (device locked=${applyResult.isKeyguardLocked}, Home ID=${applyResult.homeId}); saved to apply on unlock."
+
+            val nextWallpaper = if (settings.shuffle) {
+                val currentUri = settings.currentWallpaperUri
+                val others = candidates.filter { it.uri != currentUri }
+                if (others.isNotEmpty()) others.random() else candidates.random()
             } else {
-                "Home screen change deferred (device locked=${applyResult.isKeyguardLocked}, Home ID=${applyResult.homeId}); saved to apply on unlock."
+                val currentUri = settings.currentWallpaperUri
+                val currentIndex = candidates.indexOfFirst { it.uri == currentUri }
+                if (currentIndex in 0 until candidates.size - 1) {
+                    candidates[currentIndex + 1]
+                } else {
+                    candidates[0]
+                }
             }
-            logOperation(
-                action = "Wallpaper Rotation",
-                status = "PENDING",
-                details = details,
-                wallpaperName = nextWallpaper.displayName,
-                wallpaperUri = nextWallpaper.uri
+
+            val (screenWidth, screenHeight) = WallpaperCropper.getScreenDimensions(context)
+            val result = WallpaperCropper.loadAndCropBitmap(
+                context = context,
+                uriString = nextWallpaper.uri,
+                screenWidth = screenWidth,
+                screenHeight = screenHeight,
+                homeScreenCount = settings.homeScreenCount
             )
-            return@withContext applyResult.anyApplied
-        } else {
-            // Home succeeded (or was not requested)
-            settingsRepository.updateSettings {
-                it.copy(
-                    pendingHomeWallpaperUri = null,
-                    pendingHomeWallpaperName = null,
-                    currentWallpaperUri = nextWallpaper.uri,
-                    currentWallpaperName = nextWallpaper.displayName,
-                    lastChangedTimestamp = System.currentTimeMillis()
+
+            if (result == null) {
+                logOperation(
+                    action = "Wallpaper Rotation",
+                    status = "FAILED",
+                    details = "Could not decode or crop image bitmap for \"${nextWallpaper.displayName}\"",
+                    wallpaperName = nextWallpaper.displayName,
+                    wallpaperUri = nextWallpaper.uri
                 )
+                return@withLock false
             }
 
-            val details = when (target) {
-                "HOME_ONLY" -> "Applied to Home screen (Home ID=${applyResult.homeId}, locked=${applyResult.isKeyguardLocked})"
-                "LOCK_ONLY" -> "Applied to Lock screen (Lock ID=${applyResult.lockId})"
-                else -> "Applied to both Home (ID=${applyResult.homeId}) & Lock screen (ID=${applyResult.lockId}, locked=${applyResult.isKeyguardLocked})"
-            }
-
-            logOperation(
-                action = "Wallpaper Rotation",
-                status = if (applyResult.isFullyApplied) "SUCCESS" else "WARNING",
-                details = details,
-                wallpaperName = nextWallpaper.displayName,
-                wallpaperUri = nextWallpaper.uri
+            val (bitmap, _) = result
+            val applyResult = WallpaperCropper.applyAsWallpaper(
+                context = context,
+                croppedBitmap = bitmap,
+                target = settings.slideshowTarget,
+                screenWidth = screenWidth,
+                screenHeight = screenHeight
             )
-            return@withContext applyResult.anyApplied
+            bitmap.recycle()
+
+            val target = settings.slideshowTarget
+            val homeNeeded = target == "BOTH" || target == "HOME_ONLY"
+            val lockNeeded = target == "BOTH" || target == "LOCK_ONLY"
+
+            // Build precise diagnostic verification string
+            val idDiagnostics = buildString {
+                if (homeNeeded) {
+                    append("Home: returned ID=${applyResult.homeId}, actual ID=${applyResult.actualHomeId}")
+                    if (applyResult.homeApplied && applyResult.actualHomeId != 0 && applyResult.homeId != applyResult.actualHomeId) {
+                        append(" [ID MISMATCH: OS replaced ID]")
+                    }
+                }
+                if (lockNeeded) {
+                    if (isNotEmpty()) append(" | ")
+                    append("Lock: returned ID=${applyResult.lockId}, actual ID=${applyResult.actualLockId}")
+                }
+                append(", locked=${applyResult.isKeyguardLocked}")
+            }
+
+            if (homeNeeded && !applyResult.homeApplied) {
+                // Home screen failed (e.g. device is locked)! Save as pending home wallpaper for unlock
+                settingsRepository.updateSettings {
+                    it.copy(
+                        pendingHomeWallpaperUri = nextWallpaper.uri,
+                        pendingHomeWallpaperName = nextWallpaper.displayName,
+                        lastChangedTimestamp = System.currentTimeMillis()
+                    )
+                }
+                val details = if (lockNeeded && applyResult.lockApplied) {
+                    "Lock screen changed. Home screen deferred (device locked). Details: $idDiagnostics. Saved to apply on unlock."
+                } else {
+                    "Home screen change deferred. Details: $idDiagnostics. Saved to apply on unlock."
+                }
+                logOperation(
+                    action = "Wallpaper Rotation",
+                    status = "PENDING",
+                    details = details,
+                    wallpaperName = nextWallpaper.displayName,
+                    wallpaperUri = nextWallpaper.uri
+                )
+                return@withLock applyResult.anyApplied
+            } else {
+                // Home succeeded (or was not requested)
+                settingsRepository.updateSettings {
+                    it.copy(
+                        pendingHomeWallpaperUri = null,
+                        pendingHomeWallpaperName = null,
+                        currentWallpaperUri = nextWallpaper.uri,
+                        currentWallpaperName = nextWallpaper.displayName,
+                        lastChangedTimestamp = System.currentTimeMillis()
+                    )
+                }
+
+                val details = when (target) {
+                    "HOME_ONLY" -> "Applied to Home screen ($idDiagnostics)"
+                    "LOCK_ONLY" -> "Applied to Lock screen ($idDiagnostics)"
+                    else -> "Applied to Home & Lock ($idDiagnostics)"
+                }
+
+                logOperation(
+                    action = "Wallpaper Rotation",
+                    status = if (applyResult.isFullyApplied) "SUCCESS" else "WARNING",
+                    details = details,
+                    wallpaperName = nextWallpaper.displayName,
+                    wallpaperUri = nextWallpaper.uri
+                )
+                return@withLock applyResult.anyApplied
+            }
         }
     }
 

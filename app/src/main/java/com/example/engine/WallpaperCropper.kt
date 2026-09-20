@@ -41,6 +41,8 @@ data class WallpaperApplyResult(
     val lockApplied: Boolean,
     val homeId: Int,
     val lockId: Int,
+    val actualHomeId: Int = 0,
+    val actualLockId: Int = 0,
     val isKeyguardLocked: Boolean,
     val target: String,
     val errorMessage: String? = null
@@ -426,11 +428,32 @@ object WallpaperCropper {
                 }
             }
 
+            var actualHomeId = 0
+            var actualLockId = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                try {
+                    if (homeApplied || target == "HOME_ONLY" || target == "BOTH") {
+                        actualHomeId = wallpaperManager.getWallpaperId(WallpaperManager.FLAG_SYSTEM)
+                    }
+                } catch (e: Exception) {
+                    Log.e("WallpaperChanger", "Failed reading actual system wallpaper ID", e)
+                }
+                try {
+                    if (lockApplied || target == "LOCK_ONLY" || target == "BOTH") {
+                        actualLockId = wallpaperManager.getWallpaperId(WallpaperManager.FLAG_LOCK)
+                    }
+                } catch (e: Exception) {
+                    Log.e("WallpaperChanger", "Failed reading actual lock wallpaper ID", e)
+                }
+            }
+
             WallpaperApplyResult(
                 homeApplied = homeApplied,
                 lockApplied = lockApplied,
                 homeId = homeId,
                 lockId = lockId,
+                actualHomeId = actualHomeId,
+                actualLockId = actualLockId,
                 isKeyguardLocked = isLocked,
                 target = target,
                 errorMessage = if (!homeApplied && !lockApplied) "setBitmap returned 0 for target: $target" else null

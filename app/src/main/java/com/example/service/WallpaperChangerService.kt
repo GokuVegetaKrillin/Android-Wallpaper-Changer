@@ -31,7 +31,6 @@ import kotlinx.coroutines.launch
 class WallpaperChangerService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default)
-    private var tickerJob: Job? = null
     private var settingsCollectorJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var screenReceiver: BroadcastReceiver? = null
@@ -85,10 +84,10 @@ class WallpaperChangerService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        // Schedule WorkManager as reliable backup / reboot keeper
-        WallpaperChangerWorker.schedulePeriodic(this, currentSettings.intervalMinutes)
+        // Cancel any lingering WorkManager periodic tasks to avoid duplicate schedulers
+        WallpaperChangerWorker.cancelPeriodic(this)
 
-        // Schedule AlarmManager for exact battery-safe wakes
+        // Schedule AlarmManager as the sole exact timer for scheduled rotations
         AlarmScheduler.scheduleNextAlarm(this, currentSettings.intervalMinutes)
 
         // Observe settings changes (interval, triggers, targets)
@@ -98,7 +97,7 @@ class WallpaperChangerService : Service() {
             app.wallpaperRepository.logOperation(
                 action = "Service Started",
                 status = "INFO",
-                details = "Wallpaper changer service active (interval: ${currentSettings.intervalMinutes}m, target: ${currentSettings.slideshowTarget})"
+                details = "Wallpaper changer service active (interval: ${currentSettings.intervalMinutes}m, target: ${currentSettings.slideshowTarget}, scheduler: AlarmManager)"
             )
         }
 
@@ -119,36 +118,8 @@ class WallpaperChangerService : Service() {
                 val manager = getSystemService(NotificationManager::class.java)
                 manager.notify(NOTIFICATION_ID, buildNotification(settings))
 
-                // Reschedule WorkManager
-                WallpaperChangerWorker.schedulePeriodic(this@WallpaperChangerService, settings.intervalMinutes)
-
-                // Reschedule AlarmManager
+                // Reschedule AlarmManager with updated interval as the sole scheduler
                 AlarmScheduler.scheduleNextAlarm(this@WallpaperChangerService, settings.intervalMinutes)
-
-                // Restart ticker with new interval
-                startTicker(settings.intervalMinutes)
-            }
-        }
-    }
-
-    private fun startTicker(intervalMinutes: Long) {
-        tickerJob?.cancel()
-        tickerJob = serviceScope.launch {
-            val app = applicationContext as WallshowApp
-            val intervalMillis = (intervalMinutes * 60 * 1000L).coerceAtLeast(60 * 1000L)
-
-            while (isActive) {
-                delay(intervalMillis)
-                try {
-                    wakeLock?.acquire(3000)
-                    app.wallpaperRepository.changeToNextWallpaper()
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                } finally {
-                    try {
-                        if (wakeLock?.isHeld == true) wakeLock?.release()
-                    } catch (e: Exception) {}
-                }
             }
         }
     }
@@ -258,7 +229,6 @@ class WallpaperChangerService : Service() {
         val app = applicationContext as WallshowApp
         app.settingsRepository.updateSettings { it.copy(serviceRunning = false) }
 
-        tickerJob?.cancel()
         settingsCollectorJob?.cancel()
 
         screenReceiver?.let {

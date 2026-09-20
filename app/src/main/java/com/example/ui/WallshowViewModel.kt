@@ -284,7 +284,7 @@ class WallshowViewModel(application: Application) : AndroidViewModel(application
                     repo.logOperation(
                         action = "Manual Change",
                         status = if (applyResult.isFullyApplied) "SUCCESS" else "PENDING",
-                        details = "Manual change: applied to target $target (home=${applyResult.homeApplied} [ID=${applyResult.homeId}], lock=${applyResult.lockApplied} [ID=${applyResult.lockId}], locked=${applyResult.isKeyguardLocked})",
+                        details = "Manual change: applied to target $target (home=${applyResult.homeApplied} [ID=${applyResult.homeId}, actual=${applyResult.actualHomeId}], lock=${applyResult.lockApplied} [ID=${applyResult.lockId}, actual=${applyResult.actualLockId}], locked=${applyResult.isKeyguardLocked})",
                         wallpaperName = wallpaper.displayName,
                         wallpaperUri = wallpaper.uri
                     )
